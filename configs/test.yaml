@@ -1,0 +1,51 @@
+# Test configuration for unit and integration tests
+app:
+  name: "open-research-agent-test"
+  version: "test"
+  environment: "test"
+  debug: true
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "test-model"
+  temperature: 0.7
+  max_tokens: 2000
+  top_p: 0.9
+  top_k: 40
+  timeout: "30s"
+
+research:
+  max_concurrency: 2
+  max_iterations: 3
+  max_depth: 2
+  compression_ratio: 0.7
+  timeout: "1m"
+
+observability:
+  tracing:
+    enabled: false
+    endpoint: "localhost:4317"
+    sampling_rate: 1.0
+  metrics:
+    enabled: false
+    port: 2223
+  logging:
+    level: "info"
+    format: "json"
+
+api:
+  enabled: false
+  port: 8080
+  cors:
+    enabled: false
+    origins: ["*"]
+  rate_limit:
+    enabled: false
+    requests_per_minute: 60
+
+storage:
+  type: "memory"
+  
+security:
+  api_key_required: false
+  rate_limiting: false

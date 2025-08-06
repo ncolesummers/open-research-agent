@@ -1,0 +1,76 @@
+# Open Research Agent - Default Configuration
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3.2"
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: "2m"
+
+research:
+  max_concurrency: 5
+  max_iterations: 6
+  max_depth: 3
+  compression_ratio: 0.3
+  timeout: "5m"
+  max_tasks: 50
+  task_timeout: "2m"
+
+tools:
+  web_search:
+    enabled: true
+    provider: "duckduckgo"
+    max_results: 5
+    safe_search: true
+  think:
+    enabled: true
+    max_depth: 3
+    max_tokens: 1000
+  summarize:
+    enabled: true
+    max_length: 500
+    min_length: 100
+    ratio: 0.3
+
+storage:
+  type: "memory"
+  path: "./data"
+  max_size: 1000
+  ttl: "24h"
+
+api:
+  enabled: false
+  port: 8080
+  host: "0.0.0.0"
+  cors:
+    allowed_origins: ["*"]
+    allowed_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allowed_headers: ["*"]
+    max_age: 3600
+  rate_limit:
+    enabled: false
+    requests_per_minute: 60
+    burst_size: 10
+  authentication:
+    enabled: false
+    type: "none"
+
+observability:
+  tracing:
+    enabled: true
+    provider: "otlp"
+    endpoint: "localhost:4317"
+    sampling_rate: 1.0
+    insecure: true
+  metrics:
+    enabled: true
+    provider: "prometheus"
+    port: 2223
+    push_interval: "10s"
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+    max_size: 100
+    max_backups: 3
+    max_age: 7

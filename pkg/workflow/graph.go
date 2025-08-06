@@ -1,0 +1,390 @@
+package workflow
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/ncolesummers/open-research-agent/pkg/domain"
+	"github.com/ncolesummers/open-research-agent/pkg/state"
+)
+
+// ResearchGraph represents the main workflow graph
+type ResearchGraph struct {
+	config    *Config
+	llmClient domain.LLMClient
+	tools     domain.ToolRegistry
+}
+
+// Config holds the configuration for the workflow
+type Config struct {
+	Research ResearchConfig `json:"research"`
+	LLM      LLMConfig      `json:"llm"`
+}
+
+// ResearchConfig contains research-specific configuration
+type ResearchConfig struct {
+	MaxConcurrency   int     `json:"max_concurrency"`
+	MaxIterations    int     `json:"max_iterations"`
+	MaxDepth         int     `json:"max_depth"`
+	CompressionRatio float64 `json:"compression_ratio"`
+	Timeout          string  `json:"timeout"`
+}
+
+// LLMConfig contains LLM configuration
+type LLMConfig struct {
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
+}
+
+// NewResearchGraph creates a new research workflow graph
+func NewResearchGraph(cfg *Config, llmClient domain.LLMClient, tools domain.ToolRegistry) (*ResearchGraph, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if llmClient == nil {
+		return nil, fmt.Errorf("llm client is required")
+	}
+	if tools == nil {
+		return nil, fmt.Errorf("tools registry is required")
+	}
+
+	rg := &ResearchGraph{
+		config:    cfg,
+		llmClient: llmClient,
+		tools:     tools,
+	}
+
+	return rg, nil
+}
+
+// Execute runs the research workflow
+func (rg *ResearchGraph) Execute(ctx context.Context, request *domain.ResearchRequest) (*domain.ResearchReport, error) {
+	// Create initial state
+	stateConfig := &state.StateConfig{
+		MaxIterations: rg.config.Research.MaxIterations,
+		MaxTasks:      50,
+	}
+
+	graphState := state.NewGraphState(*request, stateConfig)
+	graphState.SetLLMClient(rg.llmClient)
+	graphState.SetTools(rg.tools)
+
+	// Execute workflow steps in sequence (simplified for Phase 1)
+	// In Phase 2, we'll integrate with Eino's proper graph execution
+
+	// Step 1: Start
+	if err := rg.startNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("start node failed: %w", err)
+	}
+
+	// Step 2: Clarify
+	if err := rg.clarifyNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("clarify node failed: %w", err)
+	}
+
+	// Check if clarification needed
+	if graphState.GetPhase() == domain.PhaseComplete {
+		return rg.extractReport(graphState), nil
+	}
+
+	// Step 3: Planning
+	if err := rg.planningNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("planning node failed: %w", err)
+	}
+
+	// Step 4: Research loop (supervisor/researcher)
+	for i := 0; i < rg.config.Research.MaxIterations; i++ {
+		if err := rg.supervisorNode(ctx, graphState); err != nil {
+			return nil, fmt.Errorf("supervisor node failed: %w", err)
+		}
+
+		if graphState.GetPhase() == domain.PhaseCompression {
+			break
+		}
+
+		if err := rg.researcherNode(ctx, graphState); err != nil {
+			return nil, fmt.Errorf("researcher node failed: %w", err)
+		}
+	}
+
+	// Step 5: Compress
+	if err := rg.compressionNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("compression node failed: %w", err)
+	}
+
+	// Step 6: Generate report
+	if err := rg.reportGenerationNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("report generation failed: %w", err)
+	}
+
+	// Step 7: End
+	if err := rg.endNode(ctx, graphState); err != nil {
+		return nil, fmt.Errorf("end node failed: %w", err)
+	}
+
+	// Extract report from final state
+	report := rg.extractReport(graphState)
+	return report, nil
+}
+
+// Node implementations
+
+func (rg *ResearchGraph) startNode(ctx context.Context, state *state.GraphState) error {
+	// Initialize the workflow
+	state.SetPhase(domain.PhaseStart)
+	state.AddMessage(domain.Message{
+		Role:    "system",
+		Content: "Starting research workflow for query: " + state.Request.Query,
+	})
+	return nil
+}
+
+func (rg *ResearchGraph) clarifyNode(ctx context.Context, state *state.GraphState) error {
+	// Check if clarification is needed
+	messages := []domain.Message{
+		{
+			Role:    "system",
+			Content: clarifySystemPrompt,
+		},
+		{
+			Role:    "user",
+			Content: state.Request.Query,
+		},
+	}
+
+	response, err := state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+		Temperature: 0.3,
+		MaxTokens:   500,
+	})
+	if err != nil {
+		return fmt.Errorf("clarification failed: %w", err)
+	}
+
+	state.AddMessage(domain.Message{
+		Role:    "assistant",
+		Content: response.Content,
+	})
+
+	// Simple check - in production, parse LLM response properly
+	if len(state.Request.Query) < 10 {
+		state.SetPhase(domain.PhaseComplete)
+	} else {
+		state.SetPhase(domain.PhasePlanning)
+	}
+
+	return nil
+}
+
+func (rg *ResearchGraph) planningNode(ctx context.Context, state *state.GraphState) error {
+	// Generate research plan
+	messages := []domain.Message{
+		{
+			Role:    "system",
+			Content: planningSystemPrompt,
+		},
+		{
+			Role:    "user",
+			Content: fmt.Sprintf("Research query: %s\nContext: %s", state.Request.Query, state.Request.Context),
+		},
+	}
+
+	response, err := state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+		Temperature: 0.5,
+		MaxTokens:   1000,
+	})
+	if err != nil {
+		return fmt.Errorf("planning failed: %w", err)
+	}
+
+	// Parse response and create tasks
+	tasks := rg.parseTasksFromResponse(response.Content)
+	for _, task := range tasks {
+		state.AddTask(task)
+	}
+
+	state.SetPhase(domain.PhaseResearch)
+	return nil
+}
+
+func (rg *ResearchGraph) supervisorNode(ctx context.Context, state *state.GraphState) error {
+	// Check if we need to continue research
+	if state.Iterations >= state.MaxIterations {
+		state.SetPhase(domain.PhaseCompression)
+		return nil
+	}
+
+	// Check task completion
+	stats := state.GetTaskStats()
+	if stats.Pending == 0 && stats.InProgress == 0 {
+		state.SetPhase(domain.PhaseCompression)
+	} else {
+		state.SetPhase(domain.PhaseResearch)
+	}
+
+	state.IncrementIteration()
+	return nil
+}
+
+func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphState) error {
+	// Get next pending task
+	task := state.GetNextPendingTask()
+	if task == nil {
+		return nil
+	}
+
+	// Update task status
+	err := state.UpdateTask(task.ID, func(t *domain.ResearchTask) {
+		t.Status = domain.TaskStatusInProgress
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update task status to in progress: %w", err)
+	}
+
+	// Execute research for this task
+	result, err := rg.executeResearch(ctx, state, task)
+	if err != nil {
+		updateErr := state.UpdateTask(task.ID, func(t *domain.ResearchTask) {
+			t.Status = domain.TaskStatusFailed
+		})
+		if updateErr != nil {
+			return fmt.Errorf("research failed for task %s and failed to update status: %w (original error: %v)", task.ID, updateErr, err)
+		}
+		return fmt.Errorf("research failed for task %s: %w", task.ID, err)
+	}
+
+	// Update task with results
+	err = state.UpdateTask(task.ID, func(t *domain.ResearchTask) {
+		t.Status = domain.TaskStatusCompleted
+		t.Results = append(t.Results, *result)
+		completedAt := time.Now()
+		t.CompletedAt = &completedAt
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update task with results: %w", err)
+	}
+
+	state.AddResult(*result)
+	return nil
+}
+
+func (rg *ResearchGraph) compressionNode(ctx context.Context, state *state.GraphState) error {
+	// Compress and synthesize research results
+	state.SetPhase(domain.PhaseReporting)
+
+	// In a real implementation, this would compress findings
+	// For now, just transition to reporting
+	return nil
+}
+
+func (rg *ResearchGraph) reportGenerationNode(ctx context.Context, state *state.GraphState) error {
+	// Generate final report
+	state.SetPhase(domain.PhaseComplete)
+
+	// In a real implementation, this would generate a comprehensive report
+	// For now, just mark as complete
+	return nil
+}
+
+func (rg *ResearchGraph) endNode(ctx context.Context, state *state.GraphState) error {
+	// Finalize the workflow
+	state.SetPhase(domain.PhaseComplete)
+	return nil
+}
+
+// Helper methods
+
+func (rg *ResearchGraph) executeResearch(ctx context.Context, state *state.GraphState, task *domain.ResearchTask) (*domain.ResearchResult, error) {
+	// Simple research execution
+	// In production, this would use tools and multiple iterations
+
+	messages := []domain.Message{
+		{
+			Role:    "system",
+			Content: "You are a research assistant. Research the following topic and provide comprehensive information.",
+		},
+		{
+			Role:    "user",
+			Content: task.Topic,
+		},
+	}
+
+	response, err := state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+		Temperature: 0.7,
+		MaxTokens:   2000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &domain.ResearchResult{
+		ID:         fmt.Sprintf("result_%s_%d", task.ID, time.Now().Unix()),
+		TaskID:     task.ID,
+		Source:     "llm_research",
+		Content:    response.Content,
+		Summary:    rg.generateSummary(response.Content),
+		Confidence: 0.8,
+		Timestamp:  time.Now(),
+	}
+
+	return result, nil
+}
+
+func (rg *ResearchGraph) parseTasksFromResponse(response string) []*domain.ResearchTask {
+	// Simple task parsing - in production, use structured output
+	tasks := []*domain.ResearchTask{
+		{
+			ID:       fmt.Sprintf("task_%d", time.Now().Unix()),
+			Topic:    "Main research topic from query",
+			Status:   domain.TaskStatusPending,
+			Priority: 1,
+		},
+	}
+	return tasks
+}
+
+func (rg *ResearchGraph) generateSummary(content string) string {
+	// Simple summary - in production, use LLM for summarization
+	if len(content) > 200 {
+		return content[:200] + "..."
+	}
+	return content
+}
+
+func (rg *ResearchGraph) extractReport(state *state.GraphState) *domain.ResearchReport {
+	// Extract report from final state
+	report := &domain.ResearchReport{
+		ID:          fmt.Sprintf("report_%s", state.Request.ID),
+		RequestID:   state.Request.ID,
+		Executive:   "Research completed successfully",
+		Sections:    []domain.ReportSection{},
+		Findings:    []domain.Finding{},
+		Sources:     []domain.Source{},
+		GeneratedAt: time.Now(),
+	}
+
+	// Add findings from results
+	for _, result := range state.Results {
+		finding := domain.Finding{
+			ID:         result.ID,
+			Title:      "Research Finding",
+			Content:    result.Summary,
+			Confidence: result.Confidence,
+		}
+		report.Findings = append(report.Findings, finding)
+	}
+
+	return report
+}
+
+// System prompts
+const (
+	clarifySystemPrompt = `You are a research assistant. Analyze the user's query and determine if it needs clarification.
+If the query is clear and specific enough for research, respond with "CLEAR".
+If clarification is needed, ask specific questions to better understand the research request.`
+
+	planningSystemPrompt = `You are a research planner. Based on the user's query, create a research plan.
+Break down the query into specific research tasks that can be executed in parallel.
+Each task should focus on a specific aspect of the research question.`
+)
