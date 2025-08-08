@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/ncolesummers/open-research-agent/pkg/domain"
+	"github.com/ncolesummers/open-research-agent/pkg/observability"
 	"github.com/ncolesummers/open-research-agent/pkg/state"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ResearchGraph represents the main workflow graph
@@ -14,6 +17,8 @@ type ResearchGraph struct {
 	config    *Config
 	llmClient domain.LLMClient
 	tools     domain.ToolRegistry
+	telemetry *observability.Telemetry
+	metrics   *observability.Metrics
 }
 
 // Config holds the configuration for the workflow
@@ -59,8 +64,43 @@ func NewResearchGraph(cfg *Config, llmClient domain.LLMClient, tools domain.Tool
 	return rg, nil
 }
 
+// NewResearchGraphWithTelemetry creates a new research workflow graph with observability
+func NewResearchGraphWithTelemetry(cfg *Config, llmClient domain.LLMClient, tools domain.ToolRegistry, telemetry *observability.Telemetry) (*ResearchGraph, error) {
+	rg, err := NewResearchGraph(cfg, llmClient, tools)
+	if err != nil {
+		return nil, err
+	}
+
+	if telemetry != nil {
+		rg.telemetry = telemetry
+		// Initialize metrics
+		metrics, err := observability.NewMetrics(telemetry.Meter())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create metrics: %w", err)
+		}
+		rg.metrics = metrics
+	}
+
+	return rg, nil
+}
+
 // Execute runs the research workflow
 func (rg *ResearchGraph) Execute(ctx context.Context, request *domain.ResearchRequest) (*domain.ResearchReport, error) {
+	// Start root span for research request
+	if rg.telemetry != nil {
+		var span trace.Span
+		ctx, span = rg.telemetry.StartResearchRequest(ctx, request.ID, "user", request.Query)
+		defer span.End()
+
+		// Record research request metric
+		if rg.metrics != nil {
+			rg.metrics.RecordResearchRequest(ctx, "api")
+			defer func(start time.Time) {
+				rg.metrics.RecordResearchComplete(ctx, time.Since(start), "complete")
+			}(time.Now())
+		}
+	}
+
 	// Create initial state
 	stateConfig := &state.StateConfig{
 		MaxIterations: rg.config.Research.MaxIterations,
@@ -132,6 +172,15 @@ func (rg *ResearchGraph) Execute(ctx context.Context, request *domain.ResearchRe
 // Node implementations
 
 func (rg *ResearchGraph) startNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "start", string(domain.PhaseStart), func(ctx context.Context) error {
+			return rg.startNodeImpl(ctx, state)
+		})
+	}
+	return rg.startNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) startNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Initialize the workflow
 	state.SetPhase(domain.PhaseStart)
 	state.AddMessage(domain.Message{
@@ -142,6 +191,15 @@ func (rg *ResearchGraph) startNode(ctx context.Context, state *state.GraphState)
 }
 
 func (rg *ResearchGraph) clarifyNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "clarify", string(domain.PhaseClarification), func(ctx context.Context) error {
+			return rg.clarifyNodeImpl(ctx, state)
+		})
+	}
+	return rg.clarifyNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) clarifyNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Check if clarification is needed
 	messages := []domain.Message{
 		{
@@ -154,10 +212,28 @@ func (rg *ResearchGraph) clarifyNode(ctx context.Context, state *state.GraphStat
 		},
 	}
 
-	response, err := state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
-		Temperature: 0.3,
-		MaxTokens:   500,
-	})
+	var response *domain.ChatResponse
+	var err error
+
+	// Instrument LLM call if telemetry is available
+	if rg.telemetry != nil {
+		err = rg.telemetry.InstrumentLLMCall(ctx, rg.config.LLM.Model, func(ctx context.Context) (int, int, error) {
+			response, err = state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+				Temperature: 0.3,
+				MaxTokens:   500,
+			})
+			if err != nil {
+				return 0, 0, err
+			}
+			return response.Usage.PromptTokens, response.Usage.CompletionTokens, nil
+		})
+	} else {
+		response, err = state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+			Temperature: 0.3,
+			MaxTokens:   500,
+		})
+	}
+
 	if err != nil {
 		return fmt.Errorf("clarification failed: %w", err)
 	}
@@ -178,6 +254,15 @@ func (rg *ResearchGraph) clarifyNode(ctx context.Context, state *state.GraphStat
 }
 
 func (rg *ResearchGraph) planningNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "planning", string(domain.PhasePlanning), func(ctx context.Context) error {
+			return rg.planningNodeImpl(ctx, state)
+		})
+	}
+	return rg.planningNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) planningNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Generate research plan
 	messages := []domain.Message{
 		{
@@ -190,10 +275,28 @@ func (rg *ResearchGraph) planningNode(ctx context.Context, state *state.GraphSta
 		},
 	}
 
-	response, err := state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
-		Temperature: 0.5,
-		MaxTokens:   1000,
-	})
+	var response *domain.ChatResponse
+	var err error
+
+	// Instrument LLM call if telemetry is available
+	if rg.telemetry != nil {
+		err = rg.telemetry.InstrumentLLMCall(ctx, rg.config.LLM.Model, func(ctx context.Context) (int, int, error) {
+			response, err = state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+				Temperature: 0.5,
+				MaxTokens:   1000,
+			})
+			if err != nil {
+				return 0, 0, err
+			}
+			return response.Usage.PromptTokens, response.Usage.CompletionTokens, nil
+		})
+	} else {
+		response, err = state.GetLLMClient().Chat(ctx, messages, domain.ChatOptions{
+			Temperature: 0.5,
+			MaxTokens:   1000,
+		})
+	}
+
 	if err != nil {
 		return fmt.Errorf("planning failed: %w", err)
 	}
@@ -202,6 +305,10 @@ func (rg *ResearchGraph) planningNode(ctx context.Context, state *state.GraphSta
 	tasks := rg.parseTasksFromResponse(response.Content)
 	for _, task := range tasks {
 		state.AddTask(task)
+		// Record task creation metric
+		if rg.metrics != nil {
+			rg.metrics.RecordTaskCreated(ctx, "research")
+		}
 	}
 
 	state.SetPhase(domain.PhaseResearch)
@@ -209,6 +316,15 @@ func (rg *ResearchGraph) planningNode(ctx context.Context, state *state.GraphSta
 }
 
 func (rg *ResearchGraph) supervisorNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "supervisor", string(domain.PhaseResearch), func(ctx context.Context) error {
+			return rg.supervisorNodeImpl(ctx, state)
+		})
+	}
+	return rg.supervisorNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) supervisorNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Check if we need to continue research
 	if state.Iterations >= state.MaxIterations {
 		state.SetPhase(domain.PhaseCompression)
@@ -228,11 +344,26 @@ func (rg *ResearchGraph) supervisorNode(ctx context.Context, state *state.GraphS
 }
 
 func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "researcher", string(domain.PhaseResearch), func(ctx context.Context) error {
+			return rg.researcherNodeImpl(ctx, state)
+		})
+	}
+	return rg.researcherNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) researcherNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Get next pending task
 	task := state.GetNextPendingTask()
 	if task == nil {
 		return nil
 	}
+
+	// Record task started metric
+	if rg.metrics != nil {
+		rg.metrics.RecordTaskStarted(ctx)
+	}
+	taskStartTime := time.Now()
 
 	// Update task status
 	err := state.UpdateTask(task.ID, func(t *domain.ResearchTask) {
@@ -242,12 +373,29 @@ func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphS
 		return fmt.Errorf("failed to update task status to in progress: %w", err)
 	}
 
-	// Execute research for this task
-	result, err := rg.executeResearch(ctx, state, task)
+	// Execute research for this task (with span)
+	var result *domain.ResearchResult
+	if rg.telemetry != nil {
+		ctx, span := rg.telemetry.StartSpan(ctx, "research.execute",
+			trace.WithAttributes(
+				attribute.String("task.id", task.ID),
+				attribute.String("task.topic", task.Topic),
+			),
+		)
+		defer span.End()
+		result, err = rg.executeResearch(ctx, state, task)
+	} else {
+		result, err = rg.executeResearch(ctx, state, task)
+	}
+
 	if err != nil {
 		updateErr := state.UpdateTask(task.ID, func(t *domain.ResearchTask) {
 			t.Status = domain.TaskStatusFailed
 		})
+		// Record task failure metric
+		if rg.metrics != nil {
+			rg.metrics.RecordTaskComplete(ctx, time.Since(taskStartTime), "failed")
+		}
 		if updateErr != nil {
 			return fmt.Errorf("research failed for task %s and failed to update status: %w (original error: %v)", task.ID, updateErr, err)
 		}
@@ -261,6 +409,10 @@ func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphS
 		completedAt := time.Now()
 		t.CompletedAt = &completedAt
 	})
+	// Record task completion metric
+	if rg.metrics != nil {
+		rg.metrics.RecordTaskComplete(ctx, time.Since(taskStartTime), "success")
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update task with results: %w", err)
 	}
@@ -270,6 +422,15 @@ func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphS
 }
 
 func (rg *ResearchGraph) compressionNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "compression", string(domain.PhaseCompression), func(ctx context.Context) error {
+			return rg.compressionNodeImpl(ctx, state)
+		})
+	}
+	return rg.compressionNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) compressionNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Compress and synthesize research results
 	state.SetPhase(domain.PhaseReporting)
 
@@ -279,6 +440,15 @@ func (rg *ResearchGraph) compressionNode(ctx context.Context, state *state.Graph
 }
 
 func (rg *ResearchGraph) reportGenerationNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "report", string(domain.PhaseReporting), func(ctx context.Context) error {
+			return rg.reportGenerationNodeImpl(ctx, state)
+		})
+	}
+	return rg.reportGenerationNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) reportGenerationNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Generate final report
 	state.SetPhase(domain.PhaseComplete)
 
@@ -288,6 +458,15 @@ func (rg *ResearchGraph) reportGenerationNode(ctx context.Context, state *state.
 }
 
 func (rg *ResearchGraph) endNode(ctx context.Context, state *state.GraphState) error {
+	if rg.telemetry != nil {
+		return rg.telemetry.InstrumentWorkflowNode(ctx, "end", string(domain.PhaseComplete), func(ctx context.Context) error {
+			return rg.endNodeImpl(ctx, state)
+		})
+	}
+	return rg.endNodeImpl(ctx, state)
+}
+
+func (rg *ResearchGraph) endNodeImpl(ctx context.Context, state *state.GraphState) error {
 	// Finalize the workflow
 	state.SetPhase(domain.PhaseComplete)
 	return nil

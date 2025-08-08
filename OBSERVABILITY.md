@@ -172,9 +172,74 @@ memory_usage_bytes:
 }
 ```
 
+## Implementation Status
+
+### ✅ Completed Implementations (Phase 1)
+
+#### Telemetry Foundation (`pkg/observability/telemetry.go`)
+- OpenTelemetry SDK setup with OTLP export
+- Prometheus metrics export
+- Trace propagation with W3C TraceContext
+- Configurable sampling (ratio-based)
+- Resource detection with service metadata
+
+#### Metrics Collection (`pkg/observability/metrics.go`)
+- Pre-created metric instruments for performance
+- Research request metrics (duration, count, active)
+- Task lifecycle metrics (created, started, completed, failed)
+- LLM metrics (requests, tokens, duration)
+- Tool execution metrics
+
+#### Workflow Instrumentation (`pkg/workflow/graph.go`)
+- All workflow nodes wrapped with spans
+- Automatic metric recording for each node
+- Error tracking and span status
+- LLM call instrumentation within nodes
+- Task creation and completion metrics
+
+#### LLM Client Instrumentation (`pkg/llm/instrumented.go`)
+- Full span coverage for Chat, Stream, and Embed operations
+- Token usage tracking (prompt, completion, total)
+- Error recording and classification
+- Request duration histograms
+- Model and provider attributes
+
+#### Structured Logging (`pkg/observability/logging.go`)
+- JSON structured logging with trace correlation
+- Automatic trace/span ID extraction
+- Component-based logging
+- Log levels (DEBUG, INFO, WARN, ERROR)
+
+#### Instrumentation Helpers (`pkg/observability/instrumentation.go`)
+- `InstrumentWorkflowNode` - Wraps workflow nodes with telemetry
+- `InstrumentLLMCall` - Wraps LLM calls with observability
+- `InstrumentToolExecution` - Wraps tool executions
+- `StartResearchRequest` - Root span creation with baggage
+
+### 🚧 Pending Implementations (Phase 2)
+
+These will be covered in Phase 2 user stories:
+
+#### Tool Instrumentation
+- Web Search Tool spans and metrics
+- Think Tool reasoning chain tracing
+- Summarize Tool compression metrics
+
+#### Worker Pool Observability
+- Worker lifecycle spans
+- Task queue depth metrics
+- Worker health monitoring
+- Concurrent execution tracing
+
+#### Advanced Features
+- Adaptive sampling based on error rates
+- Custom resource detection for Ollama
+- Baggage propagation for research context
+- Cost tracking for token usage
+
 ## Implementation
 
-### 1. Instrumentation Middleware
+### 1. Instrumentation Middleware (Example from Current Implementation)
 
 ```go
 // pkg/observability/middleware.go
@@ -317,10 +382,10 @@ func (t *Telemetry) InstrumentWorkflowNode(
 }
 ```
 
-### 2. LLM Client Instrumentation
+### 2. LLM Client Instrumentation (Actual Implementation)
 
 ```go
-// pkg/llm/instrumented_client.go
+// pkg/llm/instrumented.go
 
 package llm
 
@@ -410,10 +475,10 @@ func (c *InstrumentedOllamaClient) recordMetrics(ctx context.Context, usage Usag
 }
 ```
 
-### 3. Tool Instrumentation
+### 3. Tool Instrumentation (To Be Implemented in Phase 2)
 
 ```go
-// pkg/tools/instrumented_registry.go
+// pkg/tools/instrumented_registry.go (PHASE 2)
 
 package tools
 
@@ -489,10 +554,25 @@ func (r *InstrumentedToolRegistry) Execute(ctx context.Context, toolName string,
 }
 ```
 
-### 4. Baggage for Research Context
+### 4. Baggage for Research Context (Partially Implemented)
 
 ```go
-// pkg/observability/baggage.go
+// pkg/observability/instrumentation.go - Current Implementation
+func (t *Telemetry) StartResearchRequest(ctx context.Context, requestID, userID, query string) (context.Context, trace.Span) {
+    ctx, span := t.StartSpan(ctx, "research.request",
+        trace.WithAttributes(
+            attribute.String("request.id", requestID),
+            attribute.String("user.id", userID),
+            attribute.Int("query.length", len(query)),
+            attribute.String("model", "llama3.2"),
+        ),
+    )
+    // Baggage propagation to be enhanced in Phase 2
+    return ctx, span
+}
+
+// Full baggage implementation coming in Phase 2:
+// pkg/observability/baggage.go (PHASE 2)
 
 package observability
 
@@ -531,10 +611,10 @@ func GetResearchContext(ctx context.Context) ResearchContext {
 }
 ```
 
-### 5. Adaptive Sampling
+### 5. Adaptive Sampling (To Be Implemented in Phase 2)
 
 ```go
-// pkg/observability/sampling.go
+// pkg/observability/sampling.go (PHASE 2)
 
 package observability
 
@@ -592,10 +672,27 @@ func (s *AdaptiveSampler) Description() string {
 }
 ```
 
-### 6. Custom Resource Detection
+### 6. Custom Resource Detection (Partially Implemented)
 
 ```go
-// pkg/observability/resource.go
+// pkg/observability/telemetry.go - Current Implementation
+func (t *Telemetry) createResource() (*resource.Resource, error) {
+    hostname, _ := os.Hostname()
+    return resource.Merge(
+        resource.Default(),
+        resource.NewWithAttributes(
+            semconv.SchemaURL,
+            semconv.ServiceName(t.config.ServiceName),
+            semconv.ServiceVersion(t.config.ServiceVersion),
+            semconv.DeploymentEnvironment(t.config.Environment),
+            attribute.String("host.name", hostname),
+            attribute.String("service.namespace", "research"),
+        ),
+    )
+}
+
+// Enhanced resource detection coming in Phase 2:
+// pkg/observability/resource.go (PHASE 2)
 
 package observability
 
