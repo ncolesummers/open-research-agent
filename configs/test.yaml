@@ -15,11 +15,17 @@ ollama:
   timeout: "30s"
 
 research:
-  max_concurrency: 2
+  max_concurrency: 2   # Limited concurrency for tests
   max_iterations: 3
   max_depth: 2
   compression_ratio: 0.7
   timeout: "1m"
+  # Worker pool configuration for tests
+  worker_pool:
+    queue_size: 10     # Smaller queue for tests
+    worker_timeout: "10s"  # Shorter timeout for tests
+    health_check_interval: "5s"
+    restart_failed_workers: true
 
 observability:
   tracing:

@@ -16,6 +16,8 @@ type MockLLMClient struct {
 	LastMessages []domain.Message
 	ShouldError  bool
 	ErrorMessage string
+	// ChatFunc allows custom chat behavior for tests
+	ChatFunc func(ctx context.Context, messages []domain.Message, options domain.ChatOptions) (*domain.ChatResponse, error)
 }
 
 // NewMockLLMClient creates a new mock LLM client
@@ -27,6 +29,16 @@ func NewMockLLMClient() *MockLLMClient {
 
 // Chat implements domain.LLMClient
 func (m *MockLLMClient) Chat(ctx context.Context, messages []domain.Message, options domain.ChatOptions) (*domain.ChatResponse, error) {
+	// If ChatFunc is provided, use it without lock for concurrency testing
+	if m.ChatFunc != nil {
+		// Track call count atomically for concurrent calls
+		m.mu.Lock()
+		m.CallCount++
+		m.LastMessages = messages
+		m.mu.Unlock()
+		return m.ChatFunc(ctx, messages, options)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -43,6 +55,8 @@ func (m *MockLLMClient) Chat(ctx context.Context, messages []domain.Message, opt
 		lastMsg := messages[len(messages)-1]
 		if resp, ok := m.Responses[lastMsg.Content]; ok {
 			content = resp
+		} else if resp, ok := m.Responses["default"]; ok {
+			content = resp
 		} else {
 			content = "Mock response"
 		}
@@ -55,6 +69,7 @@ func (m *MockLLMClient) Chat(ctx context.Context, messages []domain.Message, opt
 			CompletionTokens: 50,
 			TotalTokens:      100,
 		},
+		FinishReason: "stop",
 	}, nil
 }
 

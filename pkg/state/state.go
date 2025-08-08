@@ -135,6 +135,30 @@ func (s *GraphState) GetNextPendingTask() *domain.ResearchTask {
 	return nextTask
 }
 
+// GetPendingTasks returns all pending tasks sorted by priority
+func (s *GraphState) GetPendingTasks() []*domain.ResearchTask {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	pendingTasks := make([]*domain.ResearchTask, 0)
+	for _, task := range s.Tasks {
+		if task.Status == domain.TaskStatusPending {
+			pendingTasks = append(pendingTasks, task)
+		}
+	}
+
+	// Sort by priority (highest first)
+	for i := 0; i < len(pendingTasks); i++ {
+		for j := i + 1; j < len(pendingTasks); j++ {
+			if pendingTasks[j].Priority > pendingTasks[i].Priority {
+				pendingTasks[i], pendingTasks[j] = pendingTasks[j], pendingTasks[i]
+			}
+		}
+	}
+
+	return pendingTasks
+}
+
 // AddMessage adds a message to the conversation history
 func (s *GraphState) AddMessage(msg domain.Message) {
 	s.mu.Lock()

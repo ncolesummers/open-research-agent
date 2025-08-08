@@ -14,11 +14,13 @@ import (
 
 // ResearchGraph represents the main workflow graph
 type ResearchGraph struct {
-	config    *Config
-	llmClient domain.LLMClient
-	tools     domain.ToolRegistry
-	telemetry *observability.Telemetry
-	metrics   *observability.Metrics
+	config     *Config
+	llmClient  domain.LLMClient
+	tools      domain.ToolRegistry
+	telemetry  *observability.Telemetry
+	metrics    *observability.Metrics
+	logger     *observability.StructuredLogger
+	workerPool *WorkerPool
 }
 
 // Config holds the configuration for the workflow
@@ -79,6 +81,22 @@ func NewResearchGraphWithTelemetry(cfg *Config, llmClient domain.LLMClient, tool
 			return nil, fmt.Errorf("failed to create metrics: %w", err)
 		}
 		rg.metrics = metrics
+		rg.logger = observability.NewStructuredLogger("research_graph")
+	}
+
+	// Initialize worker pool if concurrency is enabled
+	if cfg.Research.MaxConcurrency > 1 {
+		poolConfig := &WorkerPoolConfig{
+			MaxWorkers:    cfg.Research.MaxConcurrency,
+			QueueSize:     50, // Default queue size
+			WorkerTimeout: 2 * time.Minute,
+		}
+		
+		pool, err := NewWorkerPool(poolConfig, llmClient, tools, telemetry)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create worker pool: %w", err)
+		}
+		rg.workerPool = pool
 	}
 
 	return rg, nil
@@ -110,6 +128,21 @@ func (rg *ResearchGraph) Execute(ctx context.Context, request *domain.ResearchRe
 	graphState := state.NewGraphState(*request, stateConfig)
 	graphState.SetLLMClient(rg.llmClient)
 	graphState.SetTools(rg.tools)
+
+	// Start worker pool if available
+	if rg.workerPool != nil {
+		if err := rg.workerPool.Start(ctx); err != nil {
+			return nil, fmt.Errorf("failed to start worker pool: %w", err)
+		}
+		defer func() {
+			if err := rg.workerPool.Stop(ctx); err != nil {
+				if rg.logger != nil {
+					rg.logger.Warn(ctx, "Failed to stop worker pool",
+						map[string]interface{}{"error": err.Error()})
+				}
+			}
+		}()
+	}
 
 	// Execute workflow steps in sequence (simplified for Phase 1)
 	// In Phase 2, we'll integrate with Eino's proper graph execution
@@ -335,7 +368,34 @@ func (rg *ResearchGraph) supervisorNodeImpl(ctx context.Context, state *state.Gr
 	stats := state.GetTaskStats()
 	if stats.Pending == 0 && stats.InProgress == 0 {
 		state.SetPhase(domain.PhaseCompression)
+		return nil
+	}
+
+	// If worker pool is available, distribute tasks to workers
+	if rg.workerPool != nil {
+		// Submit all pending tasks to the worker pool
+		pendingTasks := state.GetPendingTasks()
+		for _, task := range pendingTasks {
+			if err := rg.workerPool.Submit(ctx, task, state); err != nil {
+				// Log error but continue with other tasks
+				if rg.logger != nil {
+					rg.logger.Warn(ctx, "Failed to submit task to worker pool",
+						map[string]interface{}{
+							"task_id": task.ID,
+							"error":   err.Error(),
+						},
+					)
+				}
+			}
+		}
+
+		// Process results from worker pool
+		go rg.processWorkerResults(ctx, state)
+
+		// Wait for some tasks to complete before next iteration
+		time.Sleep(100 * time.Millisecond)
 	} else {
+		// Sequential execution mode
 		state.SetPhase(domain.PhaseResearch)
 	}
 
@@ -353,6 +413,13 @@ func (rg *ResearchGraph) researcherNode(ctx context.Context, state *state.GraphS
 }
 
 func (rg *ResearchGraph) researcherNodeImpl(ctx context.Context, state *state.GraphState) error {
+	// If worker pool is active, skip sequential researcher execution
+	if rg.workerPool != nil {
+		// Workers are handling the research tasks in parallel
+		return nil
+	}
+
+	// Sequential execution mode (Phase 1 compatibility)
 	// Get next pending task
 	task := state.GetNextPendingTask()
 	if task == nil {
@@ -555,6 +622,39 @@ func (rg *ResearchGraph) extractReport(state *state.GraphState) *domain.Research
 	}
 
 	return report
+}
+
+// processWorkerResults processes results from the worker pool
+func (rg *ResearchGraph) processWorkerResults(ctx context.Context, state *state.GraphState) {
+	if rg.workerPool == nil {
+		return
+	}
+
+	resultCh := rg.workerPool.GetResults()
+	errorCh := rg.workerPool.GetErrors()
+
+	for {
+		select {
+		case result := <-resultCh:
+			if result != nil {
+				// Result is already added to state by the worker
+				if rg.logger != nil {
+					rg.logger.Debug(ctx, "Received result from worker pool",
+						map[string]interface{}{
+							"task_id":   result.TaskID,
+							"result_id": result.ID,
+						},
+					)
+				}
+			}
+		case err := <-errorCh:
+			if err != nil && rg.logger != nil {
+				rg.logger.Error(ctx, "Worker pool error", err, nil)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // System prompts

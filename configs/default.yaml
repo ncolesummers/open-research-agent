@@ -8,13 +8,19 @@ ollama:
   timeout: "2m"
 
 research:
-  max_concurrency: 5
+  max_concurrency: 5   # Maximum number of parallel workers
   max_iterations: 6
   max_depth: 3
   compression_ratio: 0.3
   timeout: "5m"
   max_tasks: 50
   task_timeout: "2m"
+  # Worker pool configuration
+  worker_pool:
+    queue_size: 50     # Task queue buffer size
+    worker_timeout: "2m"  # Timeout for individual worker tasks
+    health_check_interval: "10s"  # Health monitoring interval
+    restart_failed_workers: true  # Auto-restart failed workers
 
 tools:
   web_search:
