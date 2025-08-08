@@ -91,7 +91,7 @@ func NewResearchGraphWithTelemetry(cfg *Config, llmClient domain.LLMClient, tool
 			QueueSize:     50, // Default queue size
 			WorkerTimeout: 2 * time.Minute,
 		}
-		
+
 		pool, err := NewWorkerPool(poolConfig, llmClient, tools, telemetry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create worker pool: %w", err)

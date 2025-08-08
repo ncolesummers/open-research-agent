@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-logr/stdr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -18,6 +19,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // TelemetryConfig holds configuration for OpenTelemetry
@@ -49,6 +51,13 @@ func NewTelemetry(config *TelemetryConfig) (*Telemetry, error) {
 		config = DefaultConfig()
 	}
 
+	// Configure OpenTelemetry SDK to suppress error logs to avoid interfering with CLI prompts
+	// The SDK will still export traces when the endpoint becomes available
+	stdr.SetVerbosity(0) // Only show critical errors
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		// Silently ignore export errors - they'll retry automatically
+	}))
+
 	t := &Telemetry{
 		config:        config,
 		shutdownFuncs: []func(context.Context) error{},
@@ -65,6 +74,9 @@ func NewTelemetry(config *TelemetryConfig) (*Telemetry, error) {
 		if err := t.initTracing(res); err != nil {
 			return nil, fmt.Errorf("failed to initialize tracing: %w", err)
 		}
+	} else {
+		// Use a noop tracer when tracing is disabled
+		t.tracer = noop.NewTracerProvider().Tracer(config.ServiceName)
 	}
 
 	// Initialize metrics
@@ -72,6 +84,10 @@ func NewTelemetry(config *TelemetryConfig) (*Telemetry, error) {
 		if err := t.initMetrics(res); err != nil {
 			return nil, fmt.Errorf("failed to initialize metrics: %w", err)
 		}
+	} else {
+		// Use a noop meter when metrics are disabled
+		// For now, just leave meter as nil since there's no noop meter provider
+		// The Meter() method will handle nil case
 	}
 
 	// Set global propagator
@@ -119,11 +135,17 @@ func (t *Telemetry) createResource() (*resource.Resource, error) {
 func (t *Telemetry) initTracing(res *resource.Resource) error {
 	ctx := context.Background()
 
-	// Create OTLP trace exporter
+	// Create OTLP trace exporter with retry options
 	client := otlptracehttp.NewClient(
 		otlptracehttp.WithEndpoint(t.config.OTLPEndpoint),
 		otlptracehttp.WithInsecure(), // Use TLS in production
 		otlptracehttp.WithTimeout(time.Second*10),
+		otlptracehttp.WithRetry(otlptracehttp.RetryConfig{
+			Enabled:         true,
+			InitialInterval: time.Second * 5,
+			MaxInterval:     time.Second * 30,
+			MaxElapsedTime:  time.Minute * 2,
+		}),
 	)
 
 	exporter, err := otlptrace.New(ctx, client)
@@ -131,11 +153,14 @@ func (t *Telemetry) initTracing(res *resource.Resource) error {
 		return fmt.Errorf("failed to create trace exporter: %w", err)
 	}
 
-	// Create trace provider
+	// Create trace provider with custom error handler to suppress noisy logs
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(t.config.SamplingRate)),
 		sdktrace.WithResource(res),
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(exporter,
+			sdktrace.WithBatchTimeout(time.Second*5),
+			sdktrace.WithExportTimeout(time.Second*30),
+		),
 	)
 
 	t.tracerProvider = tp

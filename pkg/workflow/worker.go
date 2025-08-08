@@ -23,20 +23,20 @@ type Worker struct {
 	tools     domain.ToolRegistry
 	telemetry *observability.Telemetry
 	logger    *observability.StructuredLogger
-	
+
 	// Performance tracking
 	tasksProcessed int64
 	totalTime      time.Duration
 	lastTaskTime   time.Time
-	
+
 	// Resource tracking
 	memoryUsage int64
-	
+
 	// Health monitoring
 	lastHealthCheck time.Time
 	isHealthy       bool
 	healthMu        sync.RWMutex
-	
+
 	// Circuit breaker for this worker
 	breaker *CircuitBreaker
 }
@@ -58,7 +58,7 @@ func NewWorker(
 		logger:          observability.NewStructuredLogger(fmt.Sprintf("worker_%s", id)),
 		isHealthy:       true,
 		lastHealthCheck: time.Now(),
-		breaker: NewCircuitBreaker(),
+		breaker:         NewCircuitBreaker(),
 	}
 }
 
@@ -68,7 +68,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 	if !w.breaker.CanExecute() {
 		return nil, fmt.Errorf("worker %s circuit breaker is open", w.id)
 	}
-	
+
 	// Start span for task processing
 	var span trace.Span
 	if w.telemetry != nil {
@@ -83,9 +83,9 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 		)
 		defer span.End()
 	}
-	
+
 	startTime := time.Now()
-	
+
 	// Add panic recovery
 	defer func() {
 		if r := recover(); r != nil {
@@ -106,7 +106,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 			_ = w.breaker.RecordFailure() // Error already logged
 		}
 	}()
-	
+
 	// Check worker health
 	if !w.IsHealthy() {
 		err := fmt.Errorf("worker %s is unhealthy", w.id)
@@ -116,38 +116,38 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 		}
 		return nil, err
 	}
-	
+
 	// Track resource usage
 	w.startResourceTracking()
 	defer w.stopResourceTracking()
-	
+
 	// Log task start
 	if w.logger != nil {
 		w.logger.Debug(ctx, "Starting task processing",
 			map[string]interface{}{
-				"worker_id": w.id,
-				"task_id":   task.Task.ID,
+				"worker_id":  w.id,
+				"task_id":    task.Task.ID,
 				"task_topic": task.Task.Topic,
 			},
 		)
 	}
-	
+
 	// Execute the actual research
 	result, err := w.executeResearch(ctx, task)
-	
+
 	// Update metrics
 	duration := time.Since(startTime)
 	w.tasksProcessed++
 	w.totalTime += duration
 	w.lastTaskTime = time.Now()
-	
+
 	// Record outcome
 	if err != nil {
 		if bErr := w.breaker.RecordFailure(); bErr != nil && w.logger != nil {
-			w.logger.Warn(ctx, "Circuit breaker error", 
+			w.logger.Warn(ctx, "Circuit breaker error",
 				map[string]interface{}{
 					"worker_id": w.id,
-					"error": bErr.Error(),
+					"error":     bErr.Error(),
 				})
 		}
 		if span != nil {
@@ -165,7 +165,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 		}
 		return nil, err
 	}
-	
+
 	w.breaker.RecordSuccess()
 	if span != nil {
 		span.SetStatus(codes.Ok, "")
@@ -174,7 +174,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 			attribute.Int64("worker.tasks_processed", w.tasksProcessed),
 		)
 	}
-	
+
 	if w.logger != nil {
 		w.logger.Info(ctx, "Task processing completed",
 			map[string]interface{}{
@@ -185,7 +185,7 @@ func (w *Worker) ProcessTask(ctx context.Context, task *WorkerTask) (*domain.Res
 			},
 		)
 	}
-	
+
 	return result, nil
 }
 
@@ -194,7 +194,7 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 	// Create execution context with timeout
 	execCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	
+
 	// Track execution with span
 	var span trace.Span
 	if w.telemetry != nil {
@@ -206,7 +206,7 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 		)
 		defer span.End()
 	}
-	
+
 	// Prepare LLM messages
 	messages := []domain.Message{
 		{
@@ -218,7 +218,7 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 			Content: fmt.Sprintf("Research topic: %s", task.Task.Topic),
 		},
 	}
-	
+
 	// Add any previous results as context
 	if len(task.Task.Results) > 0 {
 		context := "Previous findings:\n"
@@ -230,11 +230,11 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 			Content: context,
 		})
 	}
-	
+
 	// Execute LLM call with observability
 	var response *domain.ChatResponse
 	var err error
-	
+
 	if w.telemetry != nil {
 		err = w.telemetry.InstrumentLLMCall(execCtx, "llama3.2", func(ctx context.Context) (int, int, error) {
 			response, err = w.llmClient.Chat(ctx, messages, domain.ChatOptions{
@@ -252,11 +252,11 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 			MaxTokens:   2000,
 		})
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("LLM call failed: %w", err)
 	}
-	
+
 	// Check if we should use tools
 	if w.tools != nil && shouldUseTool(task.Task.Topic) {
 		// Execute tool with observability
@@ -264,12 +264,12 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 			toolResult, toolErr := w.executeToolWithTelemetry(execCtx, task.Task.Topic)
 			if toolErr == nil && toolResult != "" {
 				// Enhance response with tool results
-				response.Content = fmt.Sprintf("%s\n\nAdditional research from tools:\n%s", 
+				response.Content = fmt.Sprintf("%s\n\nAdditional research from tools:\n%s",
 					response.Content, toolResult)
 			}
 		}
 	}
-	
+
 	// Create research result
 	result := &domain.ResearchResult{
 		ID:         fmt.Sprintf("result_%s_%s_%d", w.id, task.Task.ID, time.Now().Unix()),
@@ -287,7 +287,7 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 			"retries":           task.Retries,
 		},
 	}
-	
+
 	// Update task state
 	if task.State != nil {
 		err = task.State.UpdateTask(task.Task.ID, func(t *domain.ResearchTask) {
@@ -299,11 +299,11 @@ func (w *Worker) executeResearch(ctx context.Context, task *WorkerTask) (*domain
 		if err != nil {
 			return nil, fmt.Errorf("failed to update task state: %w", err)
 		}
-		
+
 		// Add result to state
 		task.State.AddResult(*result)
 	}
-	
+
 	return result, nil
 }
 
@@ -347,7 +347,7 @@ func (w *Worker) generateSummary(content string) string {
 	if len(content) <= maxLength {
 		return content
 	}
-	
+
 	// Find a good breaking point
 	summary := content[:maxLength]
 	lastSpace := -1
@@ -357,11 +357,11 @@ func (w *Worker) generateSummary(content string) string {
 			break
 		}
 	}
-	
+
 	if lastSpace > 0 {
 		summary = summary[:lastSpace]
 	}
-	
+
 	return summary + "..."
 }
 
@@ -369,24 +369,24 @@ func (w *Worker) generateSummary(content string) string {
 func (w *Worker) calculateConfidence(response *domain.ChatResponse) float64 {
 	// Simple confidence calculation based on response characteristics
 	confidence := 0.5 // Base confidence
-	
+
 	// Increase confidence based on response length
 	if len(response.Content) > 500 {
 		confidence += 0.2
 	} else if len(response.Content) > 200 {
 		confidence += 0.1
 	}
-	
+
 	// Increase confidence if finish reason is normal
 	if response.FinishReason == "stop" || response.FinishReason == "complete" {
 		confidence += 0.2
 	}
-	
+
 	// Cap at 1.0
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
-	
+
 	return confidence
 }
 
@@ -394,13 +394,13 @@ func (w *Worker) calculateConfidence(response *domain.ChatResponse) float64 {
 func (w *Worker) IsHealthy() bool {
 	w.healthMu.RLock()
 	defer w.healthMu.RUnlock()
-	
+
 	// Check if health check is recent
 	if time.Since(w.lastHealthCheck) > 30*time.Second {
 		// Health check is stale, trigger new one
 		go w.performHealthCheck()
 	}
-	
+
 	return w.isHealthy
 }
 
@@ -408,12 +408,12 @@ func (w *Worker) IsHealthy() bool {
 func (w *Worker) performHealthCheck() {
 	w.healthMu.Lock()
 	defer w.healthMu.Unlock()
-	
+
 	w.lastHealthCheck = time.Now()
-	
+
 	// Check various health indicators
 	healthy := true
-	
+
 	// Check if worker has been idle too long
 	if w.lastTaskTime.IsZero() {
 		// Worker hasn't processed any tasks yet, consider healthy
@@ -423,14 +423,14 @@ func (w *Worker) performHealthCheck() {
 		if w.logger != nil {
 			w.logger.Warn(context.Background(), "Worker idle for too long",
 				map[string]interface{}{
-					"worker_id":      w.id,
-					"idle_duration":  time.Since(w.lastTaskTime).String(),
+					"worker_id":     w.id,
+					"idle_duration": time.Since(w.lastTaskTime).String(),
 				},
 			)
 		}
 		// Still consider healthy but log warning
 	}
-	
+
 	// Check circuit breaker state
 	if w.breaker.GetState() == CircuitOpen {
 		healthy = false
@@ -443,7 +443,7 @@ func (w *Worker) performHealthCheck() {
 			)
 		}
 	}
-	
+
 	// Check resource usage
 	if w.memoryUsage > 50*1024*1024 { // 50MB limit per worker
 		healthy = false
@@ -456,7 +456,7 @@ func (w *Worker) performHealthCheck() {
 			)
 		}
 	}
-	
+
 	w.isHealthy = healthy
 }
 
@@ -483,25 +483,25 @@ func (w *Worker) GetStats() WorkerStats {
 	if w.tasksProcessed > 0 {
 		avgTime = w.totalTime / time.Duration(w.tasksProcessed)
 	}
-	
+
 	return WorkerStats{
-		ID:               w.id,
-		TasksProcessed:   w.tasksProcessed,
-		AverageTime:      avgTime,
-		LastTaskTime:     w.lastTaskTime,
-		IsHealthy:        w.IsHealthy(),
-		MemoryUsage:      w.memoryUsage,
-		CircuitState:     string(w.breaker.GetState()),
+		ID:             w.id,
+		TasksProcessed: w.tasksProcessed,
+		AverageTime:    avgTime,
+		LastTaskTime:   w.lastTaskTime,
+		IsHealthy:      w.IsHealthy(),
+		MemoryUsage:    w.memoryUsage,
+		CircuitState:   string(w.breaker.GetState()),
 	}
 }
 
 // WorkerStats contains worker statistics
 type WorkerStats struct {
-	ID               string
-	TasksProcessed   int64
-	AverageTime      time.Duration
-	LastTaskTime     time.Time
-	IsHealthy        bool
-	MemoryUsage      int64
-	CircuitState     string
+	ID             string
+	TasksProcessed int64
+	AverageTime    time.Duration
+	LastTaskTime   time.Time
+	IsHealthy      bool
+	MemoryUsage    int64
+	CircuitState   string
 }

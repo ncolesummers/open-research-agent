@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -195,11 +197,15 @@ func runAPIServer(ctx context.Context, cfg *config.Config, graph *workflow.Resea
 func runCLI(ctx context.Context, graph *workflow.ResearchGraph, query string) error {
 	// If no query provided, read from stdin
 	if query == "" {
+		// Use a buffered reader to handle the full line input properly
+		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("Enter your research query: ")
-		_, err := fmt.Scanln(&query)
+		input, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("failed to read query from stdin: %w", err)
 		}
+		// Trim the newline and any whitespace
+		query = strings.TrimSpace(input)
 	}
 
 	if query == "" {

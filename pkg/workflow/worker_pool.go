@@ -39,23 +39,23 @@ type WorkerPool struct {
 	taskQueue chan *WorkerTask
 	resultCh  chan *domain.ResearchResult
 	errorCh   chan error
-	
+
 	// Synchronization
-	wg        sync.WaitGroup
-	mu        sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	
+	wg     sync.WaitGroup
+	mu     sync.RWMutex
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// State
-	running   atomic.Bool
-	metrics   *WorkerPoolMetrics
-	
+	running atomic.Bool
+	metrics *WorkerPoolMetrics
+
 	// Dependencies
 	llmClient domain.LLMClient
 	tools     domain.ToolRegistry
 	telemetry *observability.Telemetry
 	logger    *observability.StructuredLogger
-	
+
 	// Components
 	healthMonitor    *HealthMonitor
 	metricsCollector *MetricsCollector
@@ -92,9 +92,9 @@ func NewWorkerPool(
 	if llmClient == nil {
 		return nil, fmt.Errorf("llm client is required")
 	}
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	pool := &WorkerPool{
 		config:    cfg,
 		workers:   make([]*Worker, 0, cfg.MaxWorkers),
@@ -109,7 +109,7 @@ func NewWorkerPool(
 		telemetry: telemetry,
 		logger:    observability.NewStructuredLogger("worker_pool"),
 	}
-	
+
 	return pool, nil
 }
 
@@ -117,11 +117,11 @@ func NewWorkerPool(
 func (p *WorkerPool) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	if p.running.Load() {
 		return fmt.Errorf("worker pool already running")
 	}
-	
+
 	// Start span for pool startup
 	if p.telemetry != nil {
 		_, span := p.telemetry.StartSpan(ctx, "worker_pool.start",
@@ -132,7 +132,7 @@ func (p *WorkerPool) Start(ctx context.Context) error {
 		)
 		defer span.End()
 	}
-	
+
 	// Create and start workers
 	for i := 0; i < p.config.MaxWorkers; i++ {
 		worker := NewWorker(
@@ -143,39 +143,39 @@ func (p *WorkerPool) Start(ctx context.Context) error {
 			p.telemetry,
 		)
 		p.workers = append(p.workers, worker)
-		
+
 		p.wg.Add(1)
 		go p.runWorker(worker)
 		p.metrics.activeWorkers.Add(1)
 	}
-	
+
 	// Initialize and start health monitor
 	p.healthMonitor = NewHealthMonitor(p, 10*time.Second)
 	go p.healthMonitor.Start(ctx)
-	
+
 	// Initialize and start metrics collector
 	if p.telemetry != nil {
 		var err error
 		p.metricsCollector, err = NewMetricsCollector(p, p.telemetry, 5*time.Second)
 		if err != nil {
-			p.logger.Warn(ctx, "Failed to create metrics collector", 
+			p.logger.Warn(ctx, "Failed to create metrics collector",
 				map[string]interface{}{"error": err.Error()})
 		} else {
 			go p.metricsCollector.Start(ctx)
 		}
 	}
-	
+
 	p.running.Store(true)
-	
+
 	if p.logger != nil {
 		p.logger.Info(ctx, "Worker pool started",
 			map[string]interface{}{
-				"workers": p.config.MaxWorkers,
+				"workers":    p.config.MaxWorkers,
 				"queue_size": p.config.QueueSize,
 			},
 		)
 	}
-	
+
 	return nil
 }
 
@@ -183,19 +183,19 @@ func (p *WorkerPool) Start(ctx context.Context) error {
 func (p *WorkerPool) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	if !p.running.Load() {
 		return fmt.Errorf("worker pool not running")
 	}
-	
+
 	// Start span for shutdown
 	if p.telemetry != nil {
 		_, span := p.telemetry.StartSpan(ctx, "worker_pool.stop")
 		defer span.End()
 	}
-	
+
 	p.running.Store(false)
-	
+
 	// Stop components
 	if p.healthMonitor != nil {
 		p.healthMonitor.Stop()
@@ -203,20 +203,20 @@ func (p *WorkerPool) Stop(ctx context.Context) error {
 	if p.metricsCollector != nil {
 		p.metricsCollector.Stop()
 	}
-	
+
 	// Signal cancellation
 	p.cancel()
-	
+
 	// Close task queue to prevent new tasks
 	close(p.taskQueue)
-	
+
 	// Wait for workers to finish with timeout
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
 		close(done)
 	}()
-	
+
 	select {
 	case <-done:
 		// All workers finished gracefully
@@ -229,11 +229,11 @@ func (p *WorkerPool) Stop(ctx context.Context) error {
 			p.logger.Warn(ctx, "Worker pool stop timeout - forcing shutdown")
 		}
 	}
-	
+
 	// Close result and error channels
 	close(p.resultCh)
 	close(p.errorCh)
-	
+
 	return nil
 }
 
@@ -242,7 +242,7 @@ func (p *WorkerPool) Submit(ctx context.Context, task *domain.ResearchTask, stat
 	if !p.running.Load() {
 		return fmt.Errorf("worker pool not running")
 	}
-	
+
 	// Create worker task
 	workerTask := &WorkerTask{
 		Task:      task,
@@ -251,18 +251,18 @@ func (p *WorkerPool) Submit(ctx context.Context, task *domain.ResearchTask, stat
 		StartTime: time.Now(),
 		Retries:   0,
 	}
-	
+
 	// Update metrics
 	p.metrics.tasksQueued.Add(1)
 	p.metrics.queueDepth.Add(1)
-	
+
 	// Try to submit with timeout
 	select {
 	case p.taskQueue <- workerTask:
 		if p.logger != nil {
 			p.logger.Debug(ctx, "Task submitted to queue",
 				map[string]interface{}{
-					"task_id": task.ID,
+					"task_id":     task.ID,
 					"queue_depth": p.metrics.queueDepth.Load(),
 				},
 			)
@@ -306,7 +306,7 @@ func (p *WorkerPool) GetMetrics() WorkerPoolMetrics {
 func (p *WorkerPool) runWorker(worker *Worker) {
 	defer p.wg.Done()
 	defer p.metrics.activeWorkers.Add(-1)
-	
+
 	for {
 		select {
 		case task, ok := <-p.taskQueue:
@@ -319,21 +319,21 @@ func (p *WorkerPool) runWorker(worker *Worker) {
 				}
 				return
 			}
-			
+
 			// Update metrics
 			p.metrics.queueDepth.Add(-1)
 			p.metrics.tasksProcessing.Add(1)
-			
+
 			// Process task with timeout
 			taskCtx, cancel := context.WithTimeout(task.Context, p.config.WorkerTimeout)
 			result, err := worker.ProcessTask(taskCtx, task)
 			cancel()
-			
+
 			// Update metrics
 			p.metrics.tasksProcessing.Add(-1)
 			processingTime := time.Since(task.StartTime)
 			p.metrics.totalProcessTime.Add(processingTime.Nanoseconds())
-			
+
 			if err != nil {
 				p.metrics.tasksFailed.Add(1)
 				// Handle error with retry logic
@@ -352,7 +352,7 @@ func (p *WorkerPool) runWorker(worker *Worker) {
 				} else {
 					// Max retries exceeded
 					select {
-					case p.errorCh <- fmt.Errorf("task %s failed after %d retries: %w", 
+					case p.errorCh <- fmt.Errorf("task %s failed after %d retries: %w",
 						task.Task.ID, task.Retries, err):
 					default:
 						// Error channel full, log it
@@ -377,7 +377,7 @@ func (p *WorkerPool) runWorker(worker *Worker) {
 					}
 				}
 			}
-			
+
 		case <-p.ctx.Done():
 			// Pool is shutting down
 			if p.logger != nil {
@@ -410,15 +410,15 @@ func (p *WorkerPool) GetMetricsSummary() MetricsSummary {
 func (p *WorkerPool) WaitForCompletion(ctx context.Context, timeout time.Duration) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
-			if p.metrics.queueDepth.Load() == 0 && 
-			   p.metrics.tasksProcessing.Load() == 0 {
+			if p.metrics.queueDepth.Load() == 0 &&
+				p.metrics.tasksProcessing.Load() == 0 {
 				return nil
 			}
 		case <-timeoutCtx.Done():

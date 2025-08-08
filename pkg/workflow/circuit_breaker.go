@@ -20,28 +20,28 @@ const (
 
 // CircuitBreaker implements the circuit breaker pattern for worker failures
 type CircuitBreaker struct {
-	mu             sync.RWMutex
-	failures       int
-	lastFailure    time.Time
-	state          CircuitBreakerState
-	successCount   int
-	halfOpenStart  time.Time
-	
+	mu            sync.RWMutex
+	failures      int
+	lastFailure   time.Time
+	state         CircuitBreakerState
+	successCount  int
+	halfOpenStart time.Time
+
 	// Configuration
-	failureThreshold   int
-	successThreshold   int
-	halfOpenTimeout    time.Duration
-	openStateDuration  time.Duration
+	failureThreshold  int
+	successThreshold  int
+	halfOpenTimeout   time.Duration
+	openStateDuration time.Duration
 }
 
 // NewCircuitBreaker creates a new circuit breaker with default settings
 func NewCircuitBreaker() *CircuitBreaker {
 	return &CircuitBreaker{
-		state:              CircuitClosed,
-		failureThreshold:   5,
-		successThreshold:   3,
-		halfOpenTimeout:    30 * time.Second,
-		openStateDuration:  30 * time.Second,
+		state:             CircuitClosed,
+		failureThreshold:  5,
+		successThreshold:  3,
+		halfOpenTimeout:   30 * time.Second,
+		openStateDuration: 30 * time.Second,
 	}
 }
 
@@ -49,7 +49,7 @@ func NewCircuitBreaker() *CircuitBreaker {
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	
+
 	if cb.state == CircuitHalfOpen {
 		cb.successCount++
 		if cb.successCount >= cb.successThreshold {
@@ -67,22 +67,22 @@ func (cb *CircuitBreaker) RecordSuccess() {
 func (cb *CircuitBreaker) RecordFailure() error {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	
+
 	cb.failures++
 	cb.lastFailure = time.Now()
-	
+
 	if cb.state == CircuitHalfOpen {
 		// Failure in half-open state, go back to open
 		cb.state = CircuitOpen
 		cb.successCount = 0
 		return fmt.Errorf("circuit breaker open - too many failures")
 	}
-	
+
 	if cb.failures >= cb.failureThreshold {
 		cb.state = CircuitOpen
 		return fmt.Errorf("circuit breaker open - failure threshold exceeded")
 	}
-	
+
 	return nil
 }
 
@@ -90,11 +90,11 @@ func (cb *CircuitBreaker) RecordFailure() error {
 func (cb *CircuitBreaker) CanExecute() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	
+
 	if cb.state == CircuitClosed || cb.state == CircuitHalfOpen {
 		return true
 	}
-	
+
 	if cb.state == CircuitOpen {
 		// Check if we should try half-open
 		if time.Since(cb.lastFailure) > cb.openStateDuration {
@@ -104,7 +104,7 @@ func (cb *CircuitBreaker) CanExecute() bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -119,7 +119,7 @@ func (cb *CircuitBreaker) GetState() CircuitBreakerState {
 func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	
+
 	cb.state = CircuitClosed
 	cb.failures = 0
 	cb.successCount = 0

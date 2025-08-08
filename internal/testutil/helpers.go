@@ -88,13 +88,13 @@ func SetupTestTelemetry(spanRecorder *tracetest.SpanRecorder, metricReader metri
 		trace.WithSpanProcessor(spanRecorder),
 	)
 	otel.SetTracerProvider(tracerProvider)
-	
+
 	// Create meter provider with metric reader
 	meterProvider := metric.NewMeterProvider(
 		metric.WithReader(metricReader),
 	)
 	otel.SetMeterProvider(meterProvider)
-	
+
 	// Create telemetry config
 	config := &observability.TelemetryConfig{
 		ServiceName:    "test-service",
@@ -105,7 +105,7 @@ func SetupTestTelemetry(spanRecorder *tracetest.SpanRecorder, metricReader metri
 		EnableLogging:  true,
 		SamplingRate:   1.0,
 	}
-	
+
 	// Create telemetry
 	telemetry, _ := observability.NewTelemetry(config)
 	return telemetry

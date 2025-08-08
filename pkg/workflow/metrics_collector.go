@@ -15,7 +15,7 @@ type MetricsCollector struct {
 	logger    *observability.StructuredLogger
 	interval  time.Duration
 	stopChan  chan struct{}
-	
+
 	// Metric instruments
 	queueDepthGauge       metric.Int64ObservableGauge
 	activeWorkersGauge    metric.Int64ObservableGauge
@@ -28,7 +28,7 @@ func NewMetricsCollector(pool *WorkerPool, telemetry *observability.Telemetry, i
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	
+
 	mc := &MetricsCollector{
 		pool:      pool,
 		telemetry: telemetry,
@@ -36,20 +36,20 @@ func NewMetricsCollector(pool *WorkerPool, telemetry *observability.Telemetry, i
 		interval:  interval,
 		stopChan:  make(chan struct{}),
 	}
-	
+
 	if telemetry != nil {
 		if err := mc.initializeInstruments(); err != nil {
 			return nil, err
 		}
 	}
-	
+
 	return mc, nil
 }
 
 // initializeInstruments creates the metric instruments
 func (mc *MetricsCollector) initializeInstruments() error {
 	meter := mc.telemetry.Meter()
-	
+
 	// Create metric instruments
 	queueDepthGauge, err := meter.Int64ObservableGauge(
 		"worker_pool.queue_depth",
@@ -59,7 +59,7 @@ func (mc *MetricsCollector) initializeInstruments() error {
 		return err
 	}
 	mc.queueDepthGauge = queueDepthGauge
-	
+
 	activeWorkersGauge, err := meter.Int64ObservableGauge(
 		"worker_pool.active_workers",
 		metric.WithDescription("Number of active workers"),
@@ -68,7 +68,7 @@ func (mc *MetricsCollector) initializeInstruments() error {
 		return err
 	}
 	mc.activeWorkersGauge = activeWorkersGauge
-	
+
 	tasksCompletedCounter, err := meter.Int64Counter(
 		"worker_pool.tasks_completed",
 		metric.WithDescription("Total tasks completed"),
@@ -77,7 +77,7 @@ func (mc *MetricsCollector) initializeInstruments() error {
 		return err
 	}
 	mc.tasksCompletedCounter = tasksCompletedCounter
-	
+
 	tasksFailedCounter, err := meter.Int64Counter(
 		"worker_pool.tasks_failed",
 		metric.WithDescription("Total tasks failed"),
@@ -86,14 +86,14 @@ func (mc *MetricsCollector) initializeInstruments() error {
 		return err
 	}
 	mc.tasksFailedCounter = tasksFailedCounter
-	
+
 	// Register callbacks for observable gauges
 	_, err = meter.RegisterCallback(
 		mc.observeMetrics,
 		mc.queueDepthGauge,
 		mc.activeWorkersGauge,
 	)
-	
+
 	return err
 }
 
@@ -109,10 +109,10 @@ func (mc *MetricsCollector) Start(ctx context.Context) {
 	if mc.telemetry == nil {
 		return
 	}
-	
+
 	ticker := time.NewTicker(mc.interval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -135,7 +135,7 @@ func (mc *MetricsCollector) collectMetrics(ctx context.Context) {
 	// Record counters
 	mc.tasksCompletedCounter.Add(ctx, mc.pool.metrics.tasksCompleted.Load())
 	mc.tasksFailedCounter.Add(ctx, mc.pool.metrics.tasksFailed.Load())
-	
+
 	// Log metrics for debugging
 	if mc.logger != nil {
 		avgProcessTime := time.Duration(0)
@@ -143,7 +143,7 @@ func (mc *MetricsCollector) collectMetrics(ctx context.Context) {
 		if completed > 0 {
 			avgProcessTime = time.Duration(mc.pool.metrics.totalProcessTime.Load() / completed)
 		}
-		
+
 		mc.logger.Debug(ctx, "Worker pool metrics",
 			map[string]interface{}{
 				"queue_depth":      mc.pool.metrics.queueDepth.Load(),
@@ -162,18 +162,18 @@ func (mc *MetricsCollector) GetMetricsSummary() MetricsSummary {
 	completed := mc.pool.metrics.tasksCompleted.Load()
 	failed := mc.pool.metrics.tasksFailed.Load()
 	totalTime := time.Duration(mc.pool.metrics.totalProcessTime.Load())
-	
+
 	avgTime := time.Duration(0)
 	if completed > 0 {
 		avgTime = totalTime / time.Duration(completed)
 	}
-	
+
 	successRate := float64(0)
 	total := completed + failed
 	if total > 0 {
 		successRate = float64(completed) / float64(total) * 100
 	}
-	
+
 	return MetricsSummary{
 		TasksQueued:           mc.pool.metrics.tasksQueued.Load(),
 		TasksProcessing:       mc.pool.metrics.tasksProcessing.Load(),

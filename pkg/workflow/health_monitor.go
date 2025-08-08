@@ -10,10 +10,10 @@ import (
 
 // HealthMonitor monitors worker pool health and handles recovery
 type HealthMonitor struct {
-	pool      *WorkerPool
-	logger    *observability.StructuredLogger
-	interval  time.Duration
-	stopChan  chan struct{}
+	pool     *WorkerPool
+	logger   *observability.StructuredLogger
+	interval time.Duration
+	stopChan chan struct{}
 }
 
 // NewHealthMonitor creates a new health monitor
@@ -21,7 +21,7 @@ func NewHealthMonitor(pool *WorkerPool, interval time.Duration) *HealthMonitor {
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	
+
 	return &HealthMonitor{
 		pool:     pool,
 		logger:   observability.NewStructuredLogger("health_monitor"),
@@ -34,7 +34,7 @@ func NewHealthMonitor(pool *WorkerPool, interval time.Duration) *HealthMonitor {
 func (hm *HealthMonitor) Start(ctx context.Context) {
 	ticker := time.NewTicker(hm.interval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -59,7 +59,7 @@ func (hm *HealthMonitor) checkHealth(ctx context.Context) {
 	expectedWorkers := int32(hm.pool.config.MaxWorkers)
 	isRunning := hm.pool.running.Load()
 	hm.pool.mu.RUnlock()
-	
+
 	if activeWorkers < expectedWorkers && isRunning {
 		// Some workers have died, restart them
 		diff := expectedWorkers - activeWorkers
@@ -72,10 +72,10 @@ func (hm *HealthMonitor) checkHealth(ctx context.Context) {
 				},
 			)
 		}
-		
+
 		hm.restartWorkers(ctx, int(diff))
 	}
-	
+
 	// Check individual worker health
 	hm.checkWorkerHealth(ctx)
 }
@@ -84,7 +84,7 @@ func (hm *HealthMonitor) checkHealth(ctx context.Context) {
 func (hm *HealthMonitor) restartWorkers(ctx context.Context, count int) {
 	hm.pool.mu.Lock()
 	defer hm.pool.mu.Unlock()
-	
+
 	for i := 0; i < count; i++ {
 		worker := NewWorker(
 			fmt.Sprintf("worker-restart-%d-%d", time.Now().Unix(), i),
@@ -106,7 +106,7 @@ func (hm *HealthMonitor) checkWorkerHealth(ctx context.Context) {
 	workers := make([]*Worker, len(hm.pool.workers))
 	copy(workers, hm.pool.workers)
 	hm.pool.mu.RUnlock()
-	
+
 	for _, worker := range workers {
 		if !worker.IsHealthy() {
 			if hm.logger != nil {
@@ -125,10 +125,10 @@ func (hm *HealthMonitor) checkWorkerHealth(ctx context.Context) {
 func (hm *HealthMonitor) GetHealthStatus() HealthStatus {
 	hm.pool.mu.RLock()
 	defer hm.pool.mu.RUnlock()
-	
+
 	activeWorkers := hm.pool.metrics.activeWorkers.Load()
 	expectedWorkers := int32(hm.pool.config.MaxWorkers)
-	
+
 	status := HealthStatus{
 		Healthy:         activeWorkers == expectedWorkers,
 		ActiveWorkers:   int(activeWorkers),
@@ -137,13 +137,13 @@ func (hm *HealthMonitor) GetHealthStatus() HealthStatus {
 		TasksCompleted:  hm.pool.metrics.tasksCompleted.Load(),
 		TasksFailed:     hm.pool.metrics.tasksFailed.Load(),
 	}
-	
+
 	// Calculate average processing time
 	if status.TasksCompleted > 0 {
 		totalTime := time.Duration(hm.pool.metrics.totalProcessTime.Load())
 		status.AverageProcessingTime = totalTime / time.Duration(status.TasksCompleted)
 	}
-	
+
 	return status
 }
 
