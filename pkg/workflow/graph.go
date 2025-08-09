@@ -21,6 +21,7 @@ type ResearchGraph struct {
 	metrics    *observability.Metrics
 	logger     *observability.StructuredLogger
 	workerPool *WorkerPool
+	supervisor *Supervisor
 }
 
 // Config holds the configuration for the workflow
@@ -97,6 +98,9 @@ func NewResearchGraphWithTelemetry(cfg *Config, llmClient domain.LLMClient, tool
 			return nil, fmt.Errorf("failed to create worker pool: %w", err)
 		}
 		rg.workerPool = pool
+
+		// Create supervisor for intelligent task distribution
+		rg.supervisor = NewSupervisor(pool, telemetry)
 	}
 
 	return rg, nil
@@ -371,9 +375,46 @@ func (rg *ResearchGraph) supervisorNodeImpl(ctx context.Context, state *state.Gr
 		return nil
 	}
 
-	// If worker pool is available, distribute tasks to workers
-	if rg.workerPool != nil {
-		// Submit all pending tasks to the worker pool
+	// Use enhanced supervisor if available
+	if rg.supervisor != nil && rg.workerPool != nil {
+		// Get pending tasks
+		pendingTasks := state.GetPendingTasks()
+
+		// Distribute tasks using the supervisor's intelligent distribution
+		if err := rg.supervisor.DistributeTasks(ctx, pendingTasks, state); err != nil {
+			if rg.logger != nil {
+				rg.logger.Error(ctx, "Supervisor task distribution failed", err,
+					map[string]interface{}{
+						"task_count": len(pendingTasks),
+					})
+			}
+			return fmt.Errorf("supervisor distribution failed: %w", err)
+		}
+
+		// Monitor progress
+		progress := rg.supervisor.MonitorProgress(ctx)
+		if rg.logger != nil {
+			rg.logger.Info(ctx, "Task distribution progress",
+				map[string]interface{}{
+					"total":       progress.TotalTasks,
+					"completed":   progress.CompletedTasks,
+					"in_progress": progress.InProgressTasks,
+					"failed":      progress.FailedTasks,
+				})
+		}
+
+		// Adapt strategy if needed
+		rg.supervisor.AdaptStrategy(ctx)
+
+		// Rebalance if needed
+		if err := rg.supervisor.RebalanceTasks(ctx); err != nil {
+			if rg.logger != nil {
+				rg.logger.Warn(ctx, "Task rebalancing failed",
+					map[string]interface{}{"error": err.Error()})
+			}
+		}
+	} else if rg.workerPool != nil {
+		// Fallback to simple distribution if supervisor not available
 		pendingTasks := state.GetPendingTasks()
 		for _, task := range pendingTasks {
 			if err := rg.workerPool.Submit(ctx, task, state); err != nil {

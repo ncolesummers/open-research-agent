@@ -21,6 +21,14 @@ const (
 	LogLevelError LogLevel = "ERROR"
 )
 
+// logOutput is the destination for log entries. It's a variable to allow redirection in tests.
+var logOutput io.Writer = os.Stdout
+
+// SetLogOutput sets the output destination for the structured logger.
+func SetLogOutput(w io.Writer) {
+	logOutput = w
+}
+
 // StructuredLogger provides structured logging with trace correlation
 type StructuredLogger struct {
 	output    io.Writer
@@ -30,7 +38,7 @@ type StructuredLogger struct {
 // NewStructuredLogger creates a new structured logger
 func NewStructuredLogger(component string) *StructuredLogger {
 	return &StructuredLogger{
-		output:    os.Stdout,
+		output:    logOutput,
 		component: component,
 	}
 }

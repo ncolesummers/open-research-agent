@@ -154,7 +154,7 @@ func (p *WorkerPool) Start(ctx context.Context) error {
 	go p.healthMonitor.Start(ctx)
 
 	// Initialize and start metrics collector
-	if p.telemetry != nil {
+	if p.telemetry != nil && p.telemetry.Meter() != nil {
 		var err error
 		p.metricsCollector, err = NewMetricsCollector(p, p.telemetry, 5*time.Second)
 		if err != nil {
@@ -339,13 +339,19 @@ func (p *WorkerPool) runWorker(worker *Worker) {
 				// Handle error with retry logic
 				if task.Retries < 3 {
 					task.Retries++
-					// Re-queue for retry with backoff
+					// Re-queue for retry with exponential backoff
 					go func() {
-						time.Sleep(time.Duration(task.Retries) * time.Second)
+						// Exponential backoff: 2^retries seconds (2s, 4s, 8s)
+						backoff := time.Duration(1<<uint(task.Retries)) * time.Second
+						time.Sleep(backoff)
 						if err := p.Submit(task.Context, task.Task, task.State); err != nil {
 							if p.logger != nil {
 								p.logger.Error(p.ctx, "Failed to re-queue task for retry", err,
-									map[string]interface{}{"task_id": task.Task.ID})
+									map[string]interface{}{
+										"task_id": task.Task.ID,
+										"retry":   task.Retries,
+										"backoff": backoff.String(),
+									})
 							}
 						}
 					}()

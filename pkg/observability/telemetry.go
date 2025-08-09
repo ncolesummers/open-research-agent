@@ -80,14 +80,13 @@ func NewTelemetry(config *TelemetryConfig) (*Telemetry, error) {
 	}
 
 	// Initialize metrics
+	// Use a noop meter when metrics are disabled
+	// For now, just leave meter as nil since there's no noop meter provider
+	// The Meter() method will handle nil case
 	if config.EnableMetrics {
 		if err := t.initMetrics(res); err != nil {
 			return nil, fmt.Errorf("failed to initialize metrics: %w", err)
 		}
-	} else {
-		// Use a noop meter when metrics are disabled
-		// For now, just leave meter as nil since there's no noop meter provider
-		// The Meter() method will handle nil case
 	}
 
 	// Set global propagator
