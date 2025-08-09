@@ -130,7 +130,7 @@ func (s *Supervisor) DistributeTasks(ctx context.Context, tasks []*domain.Resear
 
 	// Store tasks in queue for later reference
 	s.taskQueue = append(s.taskQueue, tasks...)
-	
+
 	// Prioritize tasks
 	prioritizedTasks := s.prioritizer.Prioritize(tasks)
 
@@ -253,12 +253,12 @@ func (s *Supervisor) RebalanceTasks(ctx context.Context) error {
 				"min_load": minLoad,
 			},
 		)
-		
+
 		// Find overloaded and underloaded workers
 		overloadedWorkers := make([]string, 0)
 		underloadedWorkers := make([]string, 0)
 		avgLoad := progress.TotalTasks / len(progress.WorkerLoads)
-		
+
 		for workerID, load := range progress.WorkerLoads {
 			if load > avgLoad+1 {
 				overloadedWorkers = append(overloadedWorkers, workerID)
@@ -266,13 +266,13 @@ func (s *Supervisor) RebalanceTasks(ctx context.Context) error {
 				underloadedWorkers = append(underloadedWorkers, workerID)
 			}
 		}
-		
+
 		// Rebalance by redistributing pending tasks
 		// Note: We can't move in-progress tasks, only redistribute pending ones
 		if len(overloadedWorkers) > 0 && len(underloadedWorkers) > 0 {
 			// Get pending tasks from overloaded workers
 			tasksToRedistribute := make([]*domain.ResearchTask, 0)
-			
+
 			for taskID, taskInfo := range s.taskHistory {
 				if taskInfo.Status == domain.TaskStatusPending {
 					// Check if task is assigned to overloaded worker
@@ -287,7 +287,7 @@ func (s *Supervisor) RebalanceTasks(ctx context.Context) error {
 					}
 				}
 			}
-			
+
 			// Redistribute tasks to underloaded workers
 			if len(tasksToRedistribute) > 0 {
 				s.logger.Info(ctx, "Redistributing tasks",
@@ -296,7 +296,7 @@ func (s *Supervisor) RebalanceTasks(ctx context.Context) error {
 						"underloaded_workers": len(underloadedWorkers),
 					},
 				)
-				
+
 				// Update task assignments
 				for i, task := range tasksToRedistribute {
 					newWorker := underloadedWorkers[i%len(underloadedWorkers)]
