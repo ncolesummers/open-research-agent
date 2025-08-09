@@ -20,15 +20,28 @@ type ResearcherPoolConfig struct {
 	WorkerTimeout time.Duration `json:"worker_timeout"`
 }
 
+// TaskTracking tracks an active task's state
+type TaskTracking struct {
+	TaskID    string
+	WorkerID  string
+	StartTime time.Time
+	Topic     string
+}
+
 // ResearcherPool manages a pool of ResearcherWorkers
 type ResearcherPool struct {
 	config  *ResearcherPoolConfig
 	workers []*ResearcherWorker
 
-	// Channels
-	taskQueue  chan *domain.ResearchTask
-	resultChan chan *domain.ResearchResult
-	errorChan  chan error
+	// Channels - separated for tracking
+	taskQueue          chan *domain.ResearchTask
+	workerResultChan   chan *domain.ResearchResult // Workers write here
+	consumerResultChan chan *domain.ResearchResult // Consumers read here
+	errorChan          chan error
+
+	// Task tracking and metrics
+	taskTracker *PoolTaskTracker
+	metrics     *PoolMetrics
 
 	// Dependencies
 	llmClient domain.LLMClient
@@ -42,12 +55,6 @@ type ResearcherPool struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	running atomic.Bool
-
-	// Metrics
-	tasksQueued     atomic.Int64
-	tasksProcessing atomic.Int64
-	tasksCompleted  atomic.Int64
-	tasksFailed     atomic.Int64
 }
 
 // NewResearcherPool creates a new researcher pool
@@ -75,18 +82,26 @@ func NewResearcherPool(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create metrics and task tracker
+	metrics := NewPoolMetrics()
+	logger := observability.NewStructuredLogger("researcher_pool")
+	taskTracker := NewPoolTaskTracker(metrics, telemetry, logger)
+
 	pool := &ResearcherPool{
-		config:     cfg,
-		workers:    make([]*ResearcherWorker, 0, cfg.MaxWorkers),
-		taskQueue:  make(chan *domain.ResearchTask, cfg.QueueSize),
-		resultChan: make(chan *domain.ResearchResult, cfg.QueueSize),
-		errorChan:  make(chan error, cfg.QueueSize),
-		llmClient:  llmClient,
-		tools:      tools,
-		telemetry:  telemetry,
-		logger:     observability.NewStructuredLogger("researcher_pool"),
-		ctx:        ctx,
-		cancel:     cancel,
+		config:             cfg,
+		workers:            make([]*ResearcherWorker, 0, cfg.MaxWorkers),
+		taskQueue:          make(chan *domain.ResearchTask, cfg.QueueSize),
+		workerResultChan:   make(chan *domain.ResearchResult, cfg.QueueSize),
+		consumerResultChan: make(chan *domain.ResearchResult, cfg.QueueSize),
+		errorChan:          make(chan error, cfg.QueueSize),
+		taskTracker:        taskTracker,
+		metrics:            metrics,
+		llmClient:          llmClient,
+		tools:              tools,
+		telemetry:          telemetry,
+		logger:             logger,
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 
 	return pool, nil
@@ -119,11 +134,15 @@ func (p *ResearcherPool) Start(ctx context.Context) error {
 			p.llmClient,
 			p.tools,
 			p.taskQueue,
-			p.resultChan,
+			p.workerResultChan, // Workers write to internal channel
 			p.errorChan,
 			p.telemetry,
 			&p.wg,
 		)
+
+		// Set task tracking callbacks
+		worker.SetTaskCallbacks(p.taskTracker.RegisterTaskStart, p.taskTracker.TrackTaskError)
+
 		p.workers = append(p.workers, worker)
 		worker.Start(ctx)
 	}
@@ -136,6 +155,10 @@ func (p *ResearcherPool) Start(ctx context.Context) error {
 			"queue_size": p.config.QueueSize,
 		},
 	)
+
+	// Start result forwarder with tracking
+	p.wg.Add(1)
+	go p.forwardResults(ctx)
 
 	// Start metrics collector
 	go p.collectMetrics(ctx)
@@ -165,6 +188,12 @@ func (p *ResearcherPool) Stop(ctx context.Context) error {
 		worker.Stop()
 	}
 
+	// Cancel context to stop forwardResults goroutine
+	p.cancel()
+
+	// Close worker result channel to unblock forwardResults
+	close(p.workerResultChan)
+
 	// Wait for workers to finish with timeout
 	done := make(chan struct{})
 	go func() {
@@ -179,14 +208,40 @@ func (p *ResearcherPool) Stop(ctx context.Context) error {
 		p.logger.Warn(ctx, "Timeout waiting for researchers to stop")
 	}
 
-	// Cancel context
-	p.cancel()
-
-	// Close channels
-	close(p.resultChan)
+	// Close remaining channels
+	close(p.consumerResultChan)
 	close(p.errorChan)
 
 	return nil
+}
+
+// forwardResults forwards results from workers to consumers while tracking metrics
+func (p *ResearcherPool) forwardResults(ctx context.Context) {
+	defer p.wg.Done()
+
+	for {
+		select {
+		case result, ok := <-p.workerResultChan:
+			if !ok {
+				// Channel closed, stop forwarding
+				return
+			}
+
+			// Track completion metrics
+			p.taskTracker.TrackTaskCompletion(result)
+
+			// Forward to consumers
+			select {
+			case p.consumerResultChan <- result:
+				// Successfully forwarded
+			case <-ctx.Done():
+				return
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // SubmitTask submits a research task to the pool
@@ -196,7 +251,7 @@ func (p *ResearcherPool) SubmitTask(ctx context.Context, task *domain.ResearchTa
 	}
 
 	// Update metrics
-	p.tasksQueued.Add(1)
+	p.metrics.IncrementTasksQueued()
 
 	// Submit with timeout
 	select {
@@ -210,17 +265,17 @@ func (p *ResearcherPool) SubmitTask(ctx context.Context, task *domain.ResearchTa
 		)
 		return nil
 	case <-time.After(5 * time.Second):
-		p.tasksQueued.Add(-1)
+		p.metrics.DecrementTasksQueued()
 		return fmt.Errorf("timeout submitting task - queue full")
 	case <-ctx.Done():
-		p.tasksQueued.Add(-1)
+		p.metrics.DecrementTasksQueued()
 		return ctx.Err()
 	}
 }
 
-// GetResults returns the result channel
+// GetResults returns the result channel for consumers
 func (p *ResearcherPool) GetResults() <-chan *domain.ResearchResult {
-	return p.resultChan
+	return p.consumerResultChan
 }
 
 // GetErrors returns the error channel
@@ -238,15 +293,9 @@ func (p *ResearcherPool) collectMetrics(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			stats := p.GetStats()
-			p.logger.Debug(ctx, "Pool metrics",
-				map[string]interface{}{
-					"tasks_queued":     stats["tasks_queued"],
-					"tasks_completed":  stats["tasks_completed"],
-					"tasks_failed":     stats["tasks_failed"],
-					"queue_depth":      stats["queue_depth"],
-				},
-			)
+			// Log basic metrics
+			metricSnapshot := p.metrics.GetSnapshot()
+			p.logger.Debug(ctx, "Pool metrics", metricSnapshot)
 		case <-ctx.Done():
 			return
 		}
@@ -258,14 +307,23 @@ func (p *ResearcherPool) GetStats() map[string]interface{} {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	// Get metrics snapshot
+	metricsSnapshot := p.metrics.GetSnapshot()
+
+	// Get active tasks
+	activeTasks := p.taskTracker.GetActiveTasks()
+
 	stats := map[string]interface{}{
-		"running":          p.running.Load(),
-		"workers":          len(p.workers),
-		"tasks_queued":     p.tasksQueued.Load(),
-		"tasks_processing": p.tasksProcessing.Load(),
-		"tasks_completed":  p.tasksCompleted.Load(),
-		"tasks_failed":     p.tasksFailed.Load(),
-		"queue_depth":      len(p.taskQueue),
+		"running":           p.running.Load(),
+		"workers":           len(p.workers),
+		"tasks_queued":      metricsSnapshot["tasks_queued"],
+		"tasks_processing":  metricsSnapshot["tasks_processing"],
+		"tasks_completed":   metricsSnapshot["tasks_completed"],
+		"tasks_failed":      metricsSnapshot["tasks_failed"],
+		"queue_depth":       len(p.taskQueue),
+		"avg_task_duration": metricsSnapshot["avg_task_duration"],
+		"active_tasks":      activeTasks,
+		"last_completion":   metricsSnapshot["last_completion"],
 	}
 
 	// Add worker stats

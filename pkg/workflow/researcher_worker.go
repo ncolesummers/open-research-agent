@@ -29,6 +29,10 @@ type ResearcherWorker struct {
 	// Synchronization
 	shutdown chan struct{}
 	wg       *sync.WaitGroup
+
+	// Task tracking callbacks
+	onTaskStart func(task *domain.ResearchTask, workerID string)
+	onTaskError func(taskID string, err error)
 }
 
 // NewResearcherWorker creates a new researcher worker with all components
@@ -68,6 +72,12 @@ func NewResearcherWorker(
 	}
 }
 
+// SetTaskCallbacks sets the task tracking callbacks
+func (w *ResearcherWorker) SetTaskCallbacks(onStart func(task *domain.ResearchTask, workerID string), onError func(taskID string, err error)) {
+	w.onTaskStart = onStart
+	w.onTaskError = onError
+}
+
 // Start begins the worker's execution loop
 func (w *ResearcherWorker) Start(ctx context.Context) {
 	w.wg.Add(1)
@@ -104,6 +114,10 @@ func (w *ResearcherWorker) run(ctx context.Context) {
 				return
 			}
 			if task != nil {
+				// Notify task start if callback is set
+				if w.onTaskStart != nil {
+					w.onTaskStart(task, w.id)
+				}
 				w.processor.ProcessTask(ctx, task)
 			}
 

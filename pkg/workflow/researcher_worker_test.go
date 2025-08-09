@@ -264,12 +264,177 @@ func TestResearcherPool_ConcurrentExecution(t *testing.T) {
 	}
 	assert.Len(t, taskIDs, numTasks)
 
-	// Check pool stats
+	// Check pool stats - with proper tracking implemented
 	stats := pool.GetStats()
-	// TODO: Task completion tracking not fully implemented yet (see issue #12)
-	// For now, just verify the pool is running and has workers
 	assert.True(t, stats["running"].(bool))
 	assert.Equal(t, 3, len(stats["workers"].([]map[string]interface{})))
+	assert.Equal(t, int64(numTasks), stats["tasks_completed"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_failed"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_processing"].(int64))
+	assert.Greater(t, stats["avg_task_duration"].(float64), 0.0)
+
+	// Stop pool
+	err = pool.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestResearcherPool_ConcurrentConsumers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create mock LLM client
+	mockLLM := testutil.NewMockLLMClient()
+	mockLLM.Responses["default"] = "Research response for concurrent testing"
+
+	// Create researcher pool
+	config := &ResearcherPoolConfig{
+		MaxWorkers:    2,
+		QueueSize:     10,
+		WorkerTimeout: 2 * time.Minute,
+	}
+
+	pool, err := NewResearcherPool(config, mockLLM, nil, nil)
+	require.NoError(t, err)
+
+	// Start pool
+	err = pool.Start(ctx)
+	require.NoError(t, err)
+
+	// Submit tasks
+	numTasks := 6
+	for i := 0; i < numTasks; i++ {
+		task := &domain.ResearchTask{
+			ID:       fmt.Sprintf("concurrent-task-%d", i),
+			Topic:    fmt.Sprintf("topic %d", i),
+			Status:   domain.TaskStatusPending,
+			Priority: i,
+		}
+		err := pool.SubmitTask(ctx, task)
+		require.NoError(t, err)
+	}
+
+	// Create multiple consumers
+	resultsChan := pool.GetResults()
+	consumer1Results := make([]*domain.ResearchResult, 0)
+	consumer2Results := make([]*domain.ResearchResult, 0)
+	var wg sync.WaitGroup
+
+	// Consumer 1
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			select {
+			case result := <-resultsChan:
+				consumer1Results = append(consumer1Results, result)
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	// Consumer 2
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			select {
+			case result := <-resultsChan:
+				consumer2Results = append(consumer2Results, result)
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	// Wait for consumers
+	wg.Wait()
+
+	// Verify results
+	totalResults := len(consumer1Results) + len(consumer2Results)
+	assert.Equal(t, numTasks, totalResults)
+
+	// Verify no duplicate results
+	seen := make(map[string]bool)
+	for _, r := range consumer1Results {
+		assert.False(t, seen[r.TaskID], "Duplicate result found")
+		seen[r.TaskID] = true
+	}
+	for _, r := range consumer2Results {
+		assert.False(t, seen[r.TaskID], "Duplicate result found")
+		seen[r.TaskID] = true
+	}
+
+	// Verify metrics are accurate
+	stats := pool.GetStats()
+	assert.Equal(t, int64(numTasks), stats["tasks_completed"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_processing"].(int64))
+
+	// Stop pool
+	err = pool.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestResearcherPool_MetricsAccuracy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create mock LLM client
+	mockLLM := testutil.NewMockLLMClient()
+	mockLLM.Responses["default"] = "Test response"
+
+	// Create researcher pool
+	config := &ResearcherPoolConfig{
+		MaxWorkers:    1, // Single worker for deterministic testing
+		QueueSize:     10,
+		WorkerTimeout: 2 * time.Minute,
+	}
+
+	pool, err := NewResearcherPool(config, mockLLM, nil, nil)
+	require.NoError(t, err)
+
+	// Start pool
+	err = pool.Start(ctx)
+	require.NoError(t, err)
+
+	// Submit tasks and collect results
+	numTasks := 3
+	for i := 0; i < numTasks; i++ {
+		task := &domain.ResearchTask{
+			ID:       fmt.Sprintf("metrics-task-%d", i),
+			Topic:    fmt.Sprintf("topic %d", i),
+			Status:   domain.TaskStatusPending,
+			Priority: i,
+		}
+		err := pool.SubmitTask(ctx, task)
+		require.NoError(t, err)
+	}
+
+	// Collect all results
+	resultsChan := pool.GetResults()
+	for i := 0; i < numTasks; i++ {
+		select {
+		case <-resultsChan:
+			// Result received
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timeout waiting for result")
+		}
+	}
+
+	// Wait a moment for metrics to update
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify detailed metrics
+	stats := pool.GetStats()
+	assert.Equal(t, int64(numTasks), stats["tasks_completed"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_failed"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_processing"].(int64))
+	assert.Equal(t, int64(0), stats["tasks_queued"].(int64))
+	assert.Greater(t, stats["avg_task_duration"].(float64), 0.0)
+
+	// Verify active tasks is empty
+	activeTasks := stats["active_tasks"].([]map[string]interface{})
+	assert.Len(t, activeTasks, 0)
 
 	// Stop pool
 	err = pool.Stop(ctx)
